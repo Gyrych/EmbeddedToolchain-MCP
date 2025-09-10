@@ -1,0 +1,21 @@
+{
+  "name": "mcp-serialport-service",
+  "version": "0.1.0",
+  "description": "MCP stdio server to access Windows serial (COM) ports via Node.js",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node ./index.js",
+    "check": "node -e \"import('@modelcontextprotocol/sdk'); import('serialport')\""
+  },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.5",
+    "ajv": "^8.17.1",
+    "serialport": "^13.0.0"
+  }
+}
+

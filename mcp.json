@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "serialport": {
+      "command": "node",
+      "args": ["index.js"],
+      "env": {}
+    }
+  }
+}
+
