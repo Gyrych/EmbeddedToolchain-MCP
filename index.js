@@ -7,6 +7,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/transport/stdio.js';
 import * as serial from './serial.js';
 import * as stlink from './stlink.js';
+import * as compiler from './compiler.js';
+import * as project from './project.js';
 
 // No local state needed; state lives in modules
 
@@ -240,6 +242,170 @@ server.addTool(
   async () => {
     const res = await stlink.stopDebug();
     return { content: [{ type: 'text', text: res.message }] };
+  }
+);
+
+// GDB-like helpers
+server.addTool(
+  {
+    name: 'st.setBreakpoint',
+    description: 'Set a breakpoint at given address via st-util monitor.',
+    inputSchema: { type: 'object', properties: { addr: { type: 'string' } }, required: ['addr'], additionalProperties: false },
+  },
+  async (args) => {
+    const res = await stlink.setBreakpoint(args);
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'st.step',
+    description: 'Single step via st-util monitor.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  async () => {
+    const res = await stlink.step();
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'st.readVar',
+    description: 'Attempt to read a variable using GDB print (requires running debug server).',
+    inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'], additionalProperties: false },
+  },
+  async (args) => {
+    const res = await stlink.readVar(args);
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+// ---------------------------
+// Compiler Tools
+// ---------------------------
+
+server.addTool(
+  {
+    name: 'compile',
+    description: 'Compile an STM32 project using make or STM32CubeIDE headless.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: { type: 'string', default: 'all' },
+        cwd: { type: 'string', description: 'Project directory' },
+        tool: { type: 'string', enum: ['make', 'cubeide'], default: 'make' },
+        project: { type: 'string', description: 'For cubeide: project path to import/build' }
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  async (args) => {
+    const res = await compiler.compile(args || {});
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+// ---------------------------
+// Project Tools
+// ---------------------------
+
+server.addTool(
+  {
+    name: 'createProject',
+    description: 'Create a new STM32 project from a template at a target path.',
+    inputSchema: {
+      type: 'object',
+      properties: { template: { type: 'string', default: 'bare' }, path: { type: 'string' } },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  async (args) => {
+    const res = await project.createProject(args);
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'getFileList',
+    description: 'List files under a project directory.',
+    inputSchema: {
+      type: 'object',
+      properties: { cwd: { type: 'string' } },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  async (args) => {
+    const res = await project.getFileList(args || {});
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'readFile',
+    description: 'Read a file content.',
+    inputSchema: {
+      type: 'object',
+      properties: { path: { type: 'string' }, cwd: { type: 'string' } },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  async (args) => {
+    const res = await project.readFile(args);
+    return { content: [{ type: 'text', text: res.content }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'writeFile',
+    description: 'Write content to a file (creates directories as needed).',
+    inputSchema: {
+      type: 'object',
+      properties: { path: { type: 'string' }, content: { type: 'string' }, cwd: { type: 'string' } },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  async (args) => {
+    const res = await project.writeFile(args);
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'gitCommit',
+    description: 'Commit all changes in the repo with the provided message.',
+    inputSchema: {
+      type: 'object',
+      properties: { message: { type: 'string' }, cwd: { type: 'string' } },
+      required: ['message'],
+      additionalProperties: false,
+    },
+  },
+  async (args) => {
+    const res = await project.gitCommit(args);
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'gitDiff',
+    description: 'Return current git diff for the project.',
+    inputSchema: { type: 'object', properties: { cwd: { type: 'string' } }, additionalProperties: false },
+  },
+  async (args) => {
+    const res = await project.gitDiff(args || {});
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
   }
 );
 

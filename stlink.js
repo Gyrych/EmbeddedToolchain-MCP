@@ -28,6 +28,7 @@ const execFileAsync = promisify(execFile);
 
 // Track st-util debug server process
 let stUtilProc = null;
+let gdbPort = 4242;
 
 // Discover tool paths or names (assume PATH has them). Optionally ST_LINK_CLI_PATH env.
 const ST_LINK_CLI = process.env.ST_LINK_CLI_PATH || 'ST-LINK_CLI.exe';
@@ -174,14 +175,13 @@ export async function resetDevice() {
 }
 
 export async function startDebug({ port = 4242 } = {}) {
-  if (stUtilProc) {
-    return { message: `st-util already running on :${port}` };
-  }
+  if (stUtilProc) return { message: `st-util already running on :${gdbPort}` };
   if (!(await isExecutable(ST_UTIL))) {
     throw new Error('st-util not found. Please install STM32 open-source tools (st-util).');
   }
   return await new Promise((resolve, reject) => {
-    const args = ['-p', String(port)];
+    gdbPort = port || 4242;
+    const args = ['-p', String(gdbPort)];
     const child = spawn(ST_UTIL, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let started = false;
     const onData = (data) => {
@@ -190,7 +190,7 @@ export async function startDebug({ port = 4242 } = {}) {
         started = true;
         stUtilProc = child;
         cleanup();
-        resolve({ message: `st-util started on :${port}` });
+        resolve({ message: `st-util started on :${gdbPort}` });
       }
     };
     const onError = (err) => {
@@ -229,5 +229,50 @@ export async function stopDebug() {
       resolve({ message: 'st-util terminated' });
     }
   });
+}
+
+// ----------------------
+// GDB helper operations
+// ----------------------
+
+import net from 'node:net';
+
+async function gdbCommand(cmd) {
+  if (!stUtilProc) throw new Error('Debug server not running. Start with st.startDebug first.');
+  return await new Promise((resolve, reject) => {
+    const client = new net.Socket();
+    const chunks = [];
+    client.setNoDelay(true);
+    client.connect(gdbPort, '127.0.0.1', () => {
+      client.write(cmd.trim() + '\n');
+      // Ask GDB for prompt by sending empty command after
+      client.write('\n');
+    });
+    client.on('data', (d) => chunks.push(Buffer.from(d)));
+    client.on('error', (e) => { try { client.destroy(); } catch {} reject(e); });
+    client.setTimeout(600);
+    client.on('timeout', () => { try { client.end(); } catch {} resolve(Buffer.concat(chunks).toString('utf8')); });
+    client.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+  });
+}
+
+export async function setBreakpoint({ addr }) {
+  if (addr == null) throw new Error('setBreakpoint requires addr');
+  const out = await gdbCommand(`monitor break 0x${parseIntHexOrDec(addr, 'addr').toString(16)}`);
+  return { ok: true, output: out };
+}
+
+export async function step() {
+  const out = await gdbCommand('monitor step');
+  return { ok: true, output: out };
+}
+
+export async function readVar({ name }) {
+  if (!name) throw new Error('readVar requires name');
+  // Use GDB eval print via monitor is not available; st-util supports monitor read/write regs/mem.
+  // As a simple MVP, attempt to evaluate symbol via GDB 'print' which requires a GDB session.
+  // Here we try a naive approach: send 'print name'. Many st-util builds expect a real GDB client.
+  const out = await gdbCommand(`print ${name}`);
+  return { ok: true, output: out };
 }
 
