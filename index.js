@@ -1,66 +1,14 @@
 // index.js
-// MCP Serial Port (COM) server for Windows using Node.js and serialport
-// - Exposes MCP tools via JSON-RPC over stdio using @modelcontextprotocol/sdk
-// - Tools: listPorts, openPort, write, read, closePort
-// - Robust error handling and buffered reads
+// MCP server exposing Serial (COM) and ST-Link tools via JSON-RPC over stdio
+// - Serial tools delegate to ./serial.js (serialport-based)
+// - ST-Link tools delegate to ./stlink.js (child_process to st-* / ST-LINK_CLI)
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/transport/stdio.js';
-import { SerialPort } from 'serialport';
+import * as serial from './serial.js';
+import * as stlink from './stlink.js';
 
-// ---------------------------
-// State and helpers
-// ---------------------------
-
-/**
- * The active SerialPort instance or null when closed.
- * We support opening a single port at a time for simplicity. You can extend
- * this to support multiple ports by tracking a map of name -> port/buffer.
- */
-let activePort = /** @type {import('serialport').SerialPort | null} */ (null);
-
-/** Accumulated receive buffer for the active port. */
-let rxBuffer = Buffer.alloc(0);
-
-/** Last opened port name for error messages/logging. */
-let activePortName = '';
-
-/**
- * Normalize Windows COM port names.
- * serialport handles COM10+ internally, so we keep the provided name.
- * This function exists to document intent and allow future adjustments
- * (e.g., converting to \\ . \\ COM10 style if ever needed).
- */
-function normalizeComName(name) {
-  if (typeof name !== 'string' || name.length === 0) {
-    throw new Error('Invalid port name');
-  }
-  return name; // serialport supports 'COM1'..'COM20' including COM10+
-}
-
-function ensurePortOpen() {
-  if (!activePort || !activePort.isOpen) {
-    const label = activePortName || 'UNKNOWN';
-    throw new Error(`Serial port is not open${activePortName ? `: ${label}` : ''}`);
-  }
-}
-
-/**
- * Safely close current active port.
- */
-async function closeActivePortIfAny() {
-  if (activePort && activePort.isOpen) {
-    await new Promise((resolve, reject) => {
-      activePort.close((err) => {
-        if (err) return reject(err);
-        resolve();
-      });
-    });
-  }
-  activePort = null;
-  activePortName = '';
-  rxBuffer = Buffer.alloc(0);
-}
+// No local state needed; state lives in modules
 
 // ---------------------------
 // MCP Server & Tools
@@ -76,7 +24,7 @@ const server = new Server(
   }
 );
 
-// listPorts(): Return available COM ports (Windows) or serial device paths (other OS)
+// Serial: listPorts(): Return available COM ports (Windows) or serial device paths
 server.addTool(
   {
     name: 'listPorts',
@@ -84,16 +32,7 @@ server.addTool(
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   async () => {
-    const ports = await SerialPort.list();
-    // Return only path names, but include friendly info in JSON for clarity
-    const result = ports.map((p) => ({
-      path: p.path,
-      manufacturer: p.manufacturer || null,
-      serialNumber: p.serialNumber || null,
-      friendlyName: p.friendlyName || null,
-      vendorId: p.vendorId || null,
-      productId: p.productId || null,
-    }));
+    const result = await serial.listPorts();
     return {
       content: [
         { type: 'text', text: JSON.stringify(result, null, 2) },
@@ -102,7 +41,7 @@ server.addTool(
   }
 );
 
-// openPort({ name, baudRate })
+// Serial: openPort({ name, baudRate, ... })
 server.addTool(
   {
     name: 'openPort',
@@ -125,85 +64,12 @@ server.addTool(
     },
   },
   async (args) => {
-    const {
-      name,
-      baudRate = 9600,
-      dataBits = 8,
-      stopBits = 1,
-      parity = 'none',
-      rtscts = false,
-      xon = false,
-      xoff = false,
-      xany = false,
-    } = /** @type {any} */ (args || {});
-
-    if (activePort && activePort.isOpen) {
-      throw new Error(`A port is already open: ${activePortName}. Close it first.`);
-    }
-
-    const path = normalizeComName(name);
-
-    // Initialize (autoOpen: false) to surface open errors via callback
-    const port = new SerialPort({
-      path,
-      baudRate,
-      dataBits,
-      stopBits,
-      parity,
-      rtscts,
-      xon,
-      xoff,
-      xany,
-      autoOpen: false,
-    });
-
-    await new Promise((resolve, reject) => {
-      port.open((err) => {
-        if (err) return reject(err);
-        return resolve();
-      });
-    }).catch((err) => {
-      // Translate common Windows errors for clarity
-      if (err && typeof err.message === 'string') {
-        if (/access\s*denied|permission/i.test(err.message)) {
-          throw new Error(`Access denied opening ${path}. Is it in use or needs admin rights? (${err.message})`);
-        }
-        if (/file\s*not\s*found|does\s*not\s*exist|no\s*such/i.test(err.message)) {
-          throw new Error(`Port not found: ${path}`);
-        }
-      }
-      throw err;
-    });
-
-    // Setup listeners for buffering
-    rxBuffer = Buffer.alloc(0);
-    port.on('data', (chunk) => {
-      if (!Buffer.isBuffer(chunk)) {
-        chunk = Buffer.from(chunk);
-      }
-      rxBuffer = rxBuffer.length === 0 ? chunk : Buffer.concat([rxBuffer, chunk]);
-    });
-    // Handle unexpected close/errors
-    port.on('close', () => {
-      activePort = null;
-      activePortName = '';
-    });
-    port.on('error', (e) => {
-      // Keep the process alive; the client will surface tool errors separately
-      // We could add logging here in the future.
-    });
-
-    activePort = port;
-    activePortName = path;
-    return {
-      content: [
-        { type: 'text', text: `Opened ${path} @ ${baudRate} baud` },
-      ],
-    };
+    const res = await serial.openPort(args);
+    return { content: [{ type: 'text', text: res.message }] };
   }
 );
 
-// write({ data, encoding })
+// Serial: write({ data, encoding })
 server.addTool(
   {
     name: 'write',
@@ -220,31 +86,12 @@ server.addTool(
     },
   },
   async (args) => {
-    ensurePortOpen();
-    const { data, encoding = 'utf8', appendNewline = false } = /** @type {any} */ (args || {});
-    let bufferToSend;
-    if (encoding === 'utf8') {
-      bufferToSend = Buffer.from(appendNewline ? `${data}\n` : data, 'utf8');
-    } else {
-      const raw = appendNewline ? `${data}${encoding === 'hex' ? '0a' : '\n'}` : data;
-      bufferToSend = Buffer.from(raw, encoding);
-    }
-
-    await new Promise((resolve, reject) => {
-      activePort.write(bufferToSend, (err) => {
-        if (err) return reject(err);
-        activePort.drain((drainErr) => {
-          if (drainErr) return reject(drainErr);
-          resolve();
-        });
-      });
-    });
-
-    return { content: [{ type: 'text', text: `Wrote ${bufferToSend.length} bytes` }] };
+    const res = await serial.write(args);
+    return { content: [{ type: 'text', text: `Wrote ${res.bytes} bytes` }] };
   }
 );
 
-// read({ maxBytes?, encoding?, timeoutMs? })
+// Serial: read({ maxBytes?, encoding?, timeoutMs? })
 server.addTool(
   {
     name: 'read',
@@ -261,47 +108,12 @@ server.addTool(
     },
   },
   async (args) => {
-    ensurePortOpen();
-    const { maxBytes = 65536, encoding = 'utf8', timeoutMs = 0 } = /** @type {any} */ (args || {});
-
-    const readFromBuffer = () => {
-      if (rxBuffer.length === 0) return null;
-      const take = Math.min(rxBuffer.length, maxBytes);
-      const chunk = rxBuffer.subarray(0, take);
-      rxBuffer = rxBuffer.subarray(take);
-      return chunk;
-    };
-
-    let data = readFromBuffer();
-    if (!data && timeoutMs > 0) {
-      data = await new Promise((resolve) => {
-        let timeoutId;
-        const onData = () => {
-          const c = readFromBuffer();
-          if (c) {
-            clearTimeout(timeoutId);
-            activePort.off('data', onData);
-            resolve(c);
-          }
-        };
-        activePort.on('data', onData);
-        timeoutId = setTimeout(() => {
-          activePort.off('data', onData);
-          resolve(null);
-        }, timeoutMs);
-      });
-    }
-
-    if (!data) {
-      return { content: [{ type: 'text', text: '' }] };
-    }
-
-    const text = data.toString(encoding);
-    return { content: [{ type: 'text', text }] };
+    const res = await serial.read(args || {});
+    return { content: [{ type: 'text', text: res.data }] };
   }
 );
 
-// closePort()
+// Serial: closePort()
 server.addTool(
   {
     name: 'closePort',
@@ -309,8 +121,125 @@ server.addTool(
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   async () => {
-    await closeActivePortIfAny();
-    return { content: [{ type: 'text', text: 'Port closed' }] };
+    const res = await serial.closePort();
+    return { content: [{ type: 'text', text: res.message }] };
+  }
+);
+
+// ---------------------------
+// ST-Link Tools
+// ---------------------------
+
+server.addTool(
+  {
+    name: 'st.listDevices',
+    description: 'List available ST-Link devices using st-info or ST-LINK_CLI.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  async () => {
+    const res = await stlink.listDevices();
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'st.flashFirmware',
+    description: 'Flash firmware to MCU using st-flash or ST-LINK_CLI.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute or relative path to firmware binary/hex' },
+        addr: { type: 'string', description: 'Load address (hex like 0x08000000) or decimal', nullable: true },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  async (args) => {
+    const res = await stlink.flashFirmware(args);
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'st.readRegister',
+    description: 'Read memory/register at address using st-flash dump.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        addr: { type: 'string', description: 'Address (0x... or decimal)' },
+        length: { type: 'integer', minimum: 1, maximum: 1024, default: 4 },
+      },
+      required: ['addr'],
+      additionalProperties: false,
+    },
+  },
+  async (args) => {
+    const res = await stlink.readRegister(args);
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'st.writeRegister',
+    description: 'Write memory/register value (requires GDB flow; returns error if unsupported).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        addr: { type: 'string', description: 'Address (0x... or decimal)' },
+        value: { type: 'string', description: 'Value (0x... or decimal)' },
+      },
+      required: ['addr', 'value'],
+      additionalProperties: false,
+    },
+  },
+  async (args) => {
+    const res = await stlink.writeRegister(args);
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'st.resetDevice',
+    description: 'Reset target MCU using st-flash or ST-LINK_CLI.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  async () => {
+    const res = await stlink.resetDevice();
+    return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'st.startDebug',
+    description: 'Start st-util GDB server (default port 4242).',
+    inputSchema: {
+      type: 'object',
+      properties: { port: { type: 'integer', minimum: 1, maximum: 65535, default: 4242 } },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  async (args) => {
+    const res = await stlink.startDebug(args || {});
+    return { content: [{ type: 'text', text: res.message }] };
+  }
+);
+
+server.addTool(
+  {
+    name: 'st.stopDebug',
+    description: 'Stop st-util GDB server if running.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  async () => {
+    const res = await stlink.stopDebug();
+    return { content: [{ type: 'text', text: res.message }] };
   }
 );
 
@@ -323,7 +252,7 @@ await server.connect(transport);
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-  try { await closeActivePortIfAny(); } catch {}
+  try { await serial.closePort(); } catch {}
   process.exit(0);
 });
 
