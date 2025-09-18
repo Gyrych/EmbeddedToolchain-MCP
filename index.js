@@ -3,8 +3,10 @@
 // - Serial tools delegate to ./serial.js (serialport-based)
 // - ST-Link tools delegate to ./stlink.js (child_process to st-* / ST-LINK_CLI)
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/transport/stdio.js';
+// 使用 MCP 高级封装以兼容不同版本的 SDK
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+// 引入 StdioServerTransport：修复模块导入路径（使用已安装包中的实际导出路径）
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as serial from './serial.js';
 import * as stlink from './stlink.js';
 import * as compiler from './compiler.js';
@@ -16,15 +18,53 @@ import * as project from './project.js';
 // MCP Server & Tools
 // ---------------------------
 
-const server = new Server(
-  {
-    name: 'mcp-serialport-service',
-    version: '0.1.0',
-  },
-  {
-    // Advertise generic capabilities only; tools are dynamically listed
+// 兼容适配器：原始代码使用 server.addTool(...) 接口，但 SDK 提供的是 McpServer.registerTool
+// 这里构造一个轻量的兼容封装，使原来的 server.addTool 调用继续有效。
+const _mcp = new McpServer({ name: 'mcp-serialport-service', version: '0.1.0' });
+
+class CompatServer {
+  constructor(mcp) {
+    this._mcp = mcp;
+    // 暴露底层 server 用于 connect/transport 等操作
+    this.transportServer = mcp.server;
   }
-);
+
+  // 保持原有 addTool(signature) 的调用方式：addTool(def, callback)
+  addTool(def, callback) {
+    const name = def.name;
+    const config = {
+      title: def.title || name,
+      description: def.description,
+      inputSchema: def.inputSchema,
+      annotations: def.annotations,
+    };
+    // registerTool 返回已注册的工具对象
+    return this._mcp.registerTool(name, config, async (args, extra) => {
+      // 兼容原来回调的行为：如果工具定义没有 params schema，原回调可能只接收 extra
+      try {
+        if (def.inputSchema) {
+          return await callback(args, extra);
+        }
+        else {
+          return await callback(extra);
+        }
+      } catch (e) {
+        // 将错误转换为 MCP 错误结果格式（由上层处理）
+        throw e;
+      }
+    });
+  }
+
+  // 连接 transport（转发到 McpServer.connect）
+  async connect(transport) {
+    return await this._mcp.connect(transport);
+  }
+
+  // 允许直接访问底层 server（必要时）
+  get server() { return this.transportServer; }
+}
+
+const server = new CompatServer(_mcp);
 
 // Serial: listPorts(): Return available COM ports (Windows) or serial device paths
 server.addTool(
