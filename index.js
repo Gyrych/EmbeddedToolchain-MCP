@@ -11,6 +11,9 @@ import * as serial from './serial.js';
 import * as stlink from './stlink.js';
 import * as compiler from './compiler.js';
 import * as project from './project.js';
+import { z } from 'zod';
+import * as openocd from './openocd.js';
+import * as jlink from './jlink.js';
 
 // No local state needed; state lives in modules
 
@@ -21,6 +24,84 @@ import * as project from './project.js';
 // 兼容适配器：原始代码使用 server.addTool(...) 接口，但 SDK 提供的是 McpServer.registerTool
 // 这里构造一个轻量的兼容封装，使原来的 server.addTool 调用继续有效。
 const _mcp = new McpServer({ name: 'mcp-serialport-service', version: '0.1.0' });
+
+// ---------------------------
+// JSON Schema -> Zod Raw Shape (minimal mapper)
+// ---------------------------
+function jsonSchemaToZodRawShape(schema) {
+  if (!schema || typeof schema !== 'object') return undefined;
+  // Expect object with properties
+  if (schema.type !== 'object' || typeof schema.properties !== 'object') return undefined;
+  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  const shape = {};
+  for (const [key, propSchema] of Object.entries(schema.properties)) {
+    let type = toZodType(propSchema);
+    if (!required.has(key)) type = type.optional();
+    shape[key] = type;
+  }
+  return shape;
+}
+
+function toZodType(s) {
+  if (!s || typeof s !== 'object') return z.any();
+  // Handle enums first
+  if (Array.isArray(s.enum) && s.enum.length > 0) {
+    const values = s.enum;
+    const allStrings = values.every((v) => typeof v === 'string');
+    if (allStrings) {
+      // z.enum requires at least one string; one-value enum can be represented by z.literal
+      return values.length >= 2 ? z.enum(values) : z.literal(values[0]);
+    }
+    // Fallback for non-string enums
+    return z.union(values.map((v) => z.literal(v)));
+  }
+
+  switch (s.type) {
+    case 'string': {
+      let out = z.string();
+      if (typeof s.minLength === 'number') out = out.min(s.minLength);
+      if (typeof s.maxLength === 'number') out = out.max(s.maxLength);
+      return s.nullable ? z.union([out, z.null()]) : out;
+    }
+    case 'integer': {
+      let out = z.number().int();
+      if (typeof s.minimum === 'number') out = out.min(s.minimum);
+      if (typeof s.maximum === 'number') out = out.max(s.maximum);
+      return s.nullable ? z.union([out, z.null()]) : out;
+    }
+    case 'number': {
+      let out = z.number();
+      if (typeof s.minimum === 'number') out = out.min(s.minimum);
+      if (typeof s.maximum === 'number') out = out.max(s.maximum);
+      return s.nullable ? z.union([out, z.null()]) : out;
+    }
+    case 'boolean': {
+      const out = z.boolean();
+      return s.nullable ? z.union([out, z.null()]) : out;
+    }
+    case 'array': {
+      const item = toZodType(s.items || {});
+      let out = z.array(item);
+      if (typeof s.minItems === 'number') out = out.min(s.minItems);
+      if (typeof s.maxItems === 'number') out = out.max(s.maxItems);
+      return s.nullable ? z.union([out, z.null()]) : out;
+    }
+    case 'object': {
+      const innerShape = {};
+      const required = new Set(Array.isArray(s.required) ? s.required : []);
+      const props = s.properties && typeof s.properties === 'object' ? s.properties : {};
+      for (const [k, v] of Object.entries(props)) {
+        let t = toZodType(v);
+        if (!required.has(k)) t = t.optional();
+        innerShape[k] = t;
+      }
+      let out = z.object(innerShape);
+      return s.nullable ? z.union([out, z.null()]) : out;
+    }
+    default:
+      return z.any();
+  }
+}
 
 class CompatServer {
   constructor(mcp) {
@@ -35,7 +116,8 @@ class CompatServer {
     const config = {
       title: def.title || name,
       description: def.description,
-      inputSchema: def.inputSchema,
+      // Convert JSON Schema (draft-07) to Zod raw shape expected by SDK
+      inputSchema: jsonSchemaToZodRawShape(def.inputSchema),
       annotations: def.annotations,
     };
     // registerTool 返回已注册的工具对象
@@ -323,6 +405,70 @@ server.addTool(
 );
 
 // ---------------------------
+// OpenOCD Tools
+// ---------------------------
+
+server.addTool(
+  {
+    name: 'ocd.startDebug',
+    description: 'Start OpenOCD GDB server. Accepts interface/target configs.',
+    inputSchema: { type: 'object', properties: { interface: { type: 'string' }, target: { type: 'string' }, searchDir: { type: 'string' }, speed: { type: 'integer' }, configFiles: { type: 'array', items: { type: 'string' } }, extraCmds: { type: 'array', items: { type: 'string' } }, port: { type: 'integer' } }, additionalProperties: false },
+  },
+  async (args) => {
+    const res = await openocd.startDebug(args || {});
+    return { content: [{ type: 'text', text: res.message }] };
+  }
+);
+
+server.addTool(
+  { name: 'ocd.stopDebug', description: 'Stop OpenOCD GDB server.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  async () => ({ content: [{ type: 'text', text: (await openocd.stopDebug()).message }] })
+);
+
+server.addTool(
+  { name: 'ocd.flashFirmware', description: 'Flash via OpenOCD program command.', inputSchema: { type: 'object', properties: { path: { type: 'string' }, addr: { type: 'string', nullable: true }, interface: { type: 'string' }, target: { type: 'string' }, searchDir: { type: 'string' }, speed: { type: 'integer' }, configFiles: { type: 'array', items: { type: 'string' } }, extraCmds: { type: 'array', items: { type: 'string' } } }, required: ['path'], additionalProperties: false } },
+  async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await openocd.flashFirmware(args), null, 2) }] })
+);
+
+server.addTool(
+  { name: 'ocd.resetDevice', description: 'Reset target via OpenOCD.', inputSchema: { type: 'object', properties: { interface: { type: 'string' }, target: { type: 'string' }, searchDir: { type: 'string' }, speed: { type: 'integer' }, configFiles: { type: 'array', items: { type: 'string' } }, extraCmds: { type: 'array', items: { type: 'string' } } }, additionalProperties: false } },
+  async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await openocd.resetDevice(args || {}), null, 2) }] })
+);
+
+server.addTool(
+  { name: 'ocd.readRegister', description: 'Read memory via OpenOCD dump_image.', inputSchema: { type: 'object', properties: { addr: { type: 'string' }, length: { type: 'integer', default: 4 }, interface: { type: 'string' }, target: { type: 'string' }, searchDir: { type: 'string' }, speed: { type: 'integer' }, configFiles: { type: 'array', items: { type: 'string' } }, extraCmds: { type: 'array', items: { type: 'string' } } }, required: ['addr'], additionalProperties: false } },
+  async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await openocd.readRegister(args), null, 2) }] })
+);
+
+// ---------------------------
+// J-Link Tools
+// ---------------------------
+
+server.addTool(
+  { name: 'jlink.startDebug', description: 'Start JLinkGDBServerCL.', inputSchema: { type: 'object', properties: { device: { type: 'string' }, if: { type: 'string' }, speed: { type: 'integer' }, port: { type: 'integer' } }, additionalProperties: false } },
+  async (args) => ({ content: [{ type: 'text', text: (await jlink.startDebug(args || {})).message }] })
+);
+
+server.addTool(
+  { name: 'jlink.stopDebug', description: 'Stop JLinkGDBServerCL.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  async () => ({ content: [{ type: 'text', text: (await jlink.stopDebug()).message }] })
+);
+
+server.addTool(
+  { name: 'jlink.flashFirmware', description: 'Flash via J-Link Commander.', inputSchema: { type: 'object', properties: { path: { type: 'string' }, device: { type: 'string' }, if: { type: 'string' }, speed: { type: 'integer' }, addr: { type: 'string' } }, required: ['path'], additionalProperties: false } },
+  async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await jlink.flashFirmware(args), null, 2) }] })
+);
+
+server.addTool(
+  { name: 'jlink.resetDevice', description: 'Reset via J-Link Commander.', inputSchema: { type: 'object', properties: { device: { type: 'string' }, if: { type: 'string' }, speed: { type: 'integer' } }, additionalProperties: false } },
+  async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await jlink.resetDevice(args || {}), null, 2) }] })
+);
+
+server.addTool(
+  { name: 'jlink.readRegister', description: 'Read memory via J-Link mem32 (text output).', inputSchema: { type: 'object', properties: { addr: { type: 'string' }, length: { type: 'integer' }, device: { type: 'string' }, if: { type: 'string' }, speed: { type: 'integer' } }, required: ['addr'], additionalProperties: false } },
+  async (args) => ({ content: [{ type: 'text', text: JSON.stringify(await jlink.readRegister(args), null, 2) }] })
+);
+
 // Compiler Tools
 // ---------------------------
 

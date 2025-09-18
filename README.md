@@ -1,132 +1,164 @@
+<!--
+  Auto-updated README - English
+  Purpose: provide clear installation, usage and examples for end users.
+-->
+
 # MCP Serialport Service
 
-Lightweight MCP (Model Context Protocol) stdio server to access serial (COM) ports and ST‑Link tools for STM32 development.
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org/) [![status](https://img.shields.io/badge/status--placeholder-lightgrey)](#)
 
-This repository exposes a set of tools over JSON‑RPC via stdio (using `@modelcontextprotocol/sdk`) to perform common embedded development tasks from a client process: serial port I/O, ST‑Link flashing and debug helpers, project scaffolding and build invocation.
+Lightweight MCP (Model Context Protocol) stdio server exposing serial (COM) ports and ST‑Link helper tools for STM32 development.
 
-Supported features
+This repository registers a set of JSON‑RPC tools over stdio (via `@modelcontextprotocol/sdk`) so that a client process can drive common embedded development tasks: serial I/O, ST‑Link flashing and debug helpers, project scaffolding, and build invocation.
 
-- Serial port: `listPorts`, `openPort`, `write`, `read`, `closePort`
+Key features
 
-- ST‑Link: `st.listDevices`, `st.flashFirmware`, `st.readRegister`, `st.resetDevice`, `st.startDebug`, `st.stopDebug`, GDB helpers (`st.setBreakpoint`, `st.step`, `st.readVar`)
+- **Serial port**: `listPorts`, `openPort`, `write`, `read`, `closePort`
+- **ST‑Link**: `st.listDevices`, `st.flashFirmware`, `st.readRegister`, `st.resetDevice`, `st.startDebug`, `st.stopDebug`
+- **GDB helpers (experimental)**: `st.setBreakpoint`, `st.step`, `st.readVar` (behavior depends on st-util/GDB compatibility)
+- **Build**: `compile` (supports `make` and STM32CubeIDE headless invocation)
+- **Project management**: `createProject`, `getFileList`, `readFile`, `writeFile`, `gitCommit`, `gitDiff`
 
-- Build: `compile` (supports `make` and STM32CubeIDE headless invocation)
+Prerequisites
 
-- Project management: `createProject`, `getFileList`, `readFile`, `writeFile`, `gitCommit`, `gitDiff`
+- Node.js >= 18.18
+- Optional platform tools for ST functionality: `st-info`, `st-flash`, `st-util` (open-source stm32 tools) or `ST-LINK_CLI.exe` (official ST tool). For CubeIDE headless builds, a `stm32cubeide` CLI may be required.
 
 Quick start
 
-Prerequisites:
-
-- Node.js >= 18.18
-
-- Platform-specific tools (for ST functionality): `st-info`, `st-flash`, `st-util` (open-source stm32 tools) or `ST-LINK_CLI.exe` (official ST tool). For building with CubeIDE, `stm32cubeide` may be required.
-
-Install and run:
+Install dependencies and start the server:
 
 ```bash
 npm install
 npm start
 ```
 
+Available npm scripts
+
+- `npm start` — run the service (`node ./index.js`)
+- `npm run check` — runtime dependency quick-check (attempts to import `@modelcontextprotocol/sdk` and `serialport`)
+
 Environment variables (optional)
 
 - `ST_LINK_CLI_PATH` — absolute path to `ST-LINK_CLI.exe`
-
 - `ST_INFO_PATH` — path to `st-info`
-
 - `ST_FLASH_PATH` — path to `st-flash`
-
 - `ST_UTIL_PATH` — path to `st-util`
-
 - `CUBEIDE_CLI` — path to `stm32cubeide` CLI
+- `OPENOCD_PATH` — path to `openocd` executable (optional)
+- `JLINK_EXE_PATH` — path to `JLinkExe`/`JLink.exe` (optional)
+- `JLINK_GDB_SERVER_PATH` — path to `JLinkGDBServerCL.exe` (optional)
 
-Usage: tools and examples
+Usage and examples
 
-The server registers a number of tools (see code in `index.js`). Each tool accepts an object as input matching the tool's input schema and returns a structured result.
+The server registers tools in `index.js`. Each tool expects an object matching its input schema and returns a structured result. Prefer using a proper MCP client (via `@modelcontextprotocol/sdk`) for production clients; the examples below show minimal testing patterns.
 
-JSON‑RPC over stdio example (Node.js)
+Node child_process example (quick test)
+
+> **Note:** This minimal example is for quick manual testing only — the MCP SDK expects framed messages and a proper MCP client. For production use, use an MCP client from `@modelcontextprotocol/sdk`.
 
 ```javascript
-// 示例：以子进程方式启动服务并发送一条简单的 JSON 消息（向 stdout 写回响应）
+// Minimal test: spawn the service and send a JSON-RPC-like request over stdin
 import { spawn } from 'node:child_process';
 
-// 启动服务（假设在同一仓库目录）
 const child = spawn(process.execPath, ['./index.js'], { stdio: ['pipe', 'pipe', 'inherit'] });
 
-// 构造一个简单的 JSON-RPC-like 请求（注意：实际的 MCP framing 由 @modelcontextprotocol/sdk 管理，
-// 这里演示最小文本协议示例以便快速测试）
 const req = JSON.stringify({ jsonrpc: '2.0', method: 'listPorts', params: {}, id: 1 }) + '\n';
-
-// 发送请求
 child.stdin.write(req, 'utf8');
 
-// 读取响应（演示目的）
 child.stdout.on('data', (data) => {
   console.log('stdout:', data.toString());
 });
 
-// 结束时关闭 stdin
 setTimeout(() => {
   child.stdin.end();
   child.kill();
 }, 2000);
 ```
 
-Note: For robust client implementations, prefer using an MCP client implementation compatible with `@modelcontextprotocol/sdk` rather than the simplified example above.
+Serial usage (conceptual)
 
-Serial example
-
-1. Call `listPorts` to enumerate available COM ports.
-
+1. Call `listPorts` to enumerate COM ports.
 2. Call `openPort` with `{ name: 'COM3', baudRate: 115200 }`.
-
 3. Call `write` with `{ data: 'hello', encoding: 'utf8' }`.
-
 4. Call `read` with optional `{ maxBytes, timeoutMs }`.
+5. Call `closePort` when finished.
 
-5. Call `closePort` when done.
+ST‑Link examples
 
-ST‑Link example
+- `st.listDevices()` — probe for ST‑Link devices.
+- `st.flashFirmware({ path: './build/app.bin', addr: '0x08000000' })` — flash firmware (requires `st-flash`, `ST-LINK_CLI`, or `STM32_Programmer_CLI`).
+- `st.startDebug({ port: 4242 })` — start `st-util` GDB server (starts a background debug server and returns a status message; the process handle is kept internally and is not returned).
 
-- `st.listDevices()` — probes for available ST‑Link devices.
+Compile example
 
-- `st.flashFirmware({ path: './build/app.bin', addr: '0x08000000' })` — flash the firmware (requires `st-flash` or `ST-LINK_CLI`).
-
-- `st.startDebug({ port: 4242 })` — start `st-util` GDB server (keeps background process handle).
-
-Build example
-
-- Make: run `compile({ target: 'all', cwd: '/path/to/project', tool: 'make' })` (server runs `make` in the given `cwd`).
-
-- STM32CubeIDE: run `compile({ tool: 'cubeide', cwd: <workspace>, project: <projectPath> })` — requires `CUBEIDE_CLI` detection.
+- Make: `compile({ target: 'all', cwd: '/path/to/project', tool: 'make' })` — runs `make` in `cwd`.
+- STM32CubeIDE: `compile({ tool: 'cubeide', cwd: <workspace>, project: <projectPath> })` — requires `CUBEIDE_CLI`.
 
 Project scaffolding
 
-Use `createProject({ template: 'bare', path: './myproj' })` to generate a minimal Makefile-based STM32 skeleton under `./myproj`.
+Use `createProject({ template: 'bare', path: './myproj' })` to generate a minimal Makefile-based STM32 skeleton.
+
+OpenOCD and J-Link
+
+This project also exposes OpenOCD- and SEGGER J-Link-based operations via `openocd.js` and `jlink.js`:
+
+- **OpenOCD** (defaults to port 3333): `ocd.startDebug`, `ocd.stopDebug`, `ocd.flashFirmware`, `ocd.resetDevice`, `ocd.readRegister`, `ocd.version`.
+- **J-Link** (defaults to port 2331): `jlink.startDebug`, `jlink.stopDebug`, `jlink.flashFirmware`, `jlink.resetDevice`, `jlink.readRegister`, `jlink.version`.
+
+Example: start OpenOCD debug server
+
+```js
+// Start openocd with interface/target (returns status message)
+await mcp.call('ocd.startDebug', { interface: 'stlink', target: 'stm32f4x', port: 3333 });
+```
+
+Example: start J-Link GDB server
+
+```js
+// Start JLinkGDBServerCL (returns status message)
+await mcp.call('jlink.startDebug', { device: 'STM32F407VG', if: 'SWD', port: 2331 });
+```
+
+Example: flash with OpenOCD
+
+```js
+await mcp.call('ocd.flashFirmware', { path: './build/app.bin', interface: 'stlink', target: 'stm32f4x' });
+```
+
+Example: flash with J-Link Commander
+
+```js
+await mcp.call('jlink.flashFirmware', { path: './build/app.bin', device: 'STM32F407VG', if: 'SWD', addr: '0x08000000' });
+```
+
+Notes and troubleshooting for OpenOCD / J-Link
+
+- Ensure the CLI tools are installed and reachable via the environment variables above or your PATH.
+- Default GDB ports: OpenOCD uses 3333, J-Link uses 2331 unless overridden.
+- `ocd.readRegister` / `jlink.readRegister` implementations may write temporary files or print ASCII memory output; results are returned as byte arrays or textual output respectively.
+- If startDebug fails, check that the chosen interface/target and configuration files exist and that no other process is listening on the GDB port.
+- On Windows, provide explicit absolute paths via `OPENOCD_PATH`, `JLINK_EXE_PATH` or `JLINK_GDB_SERVER_PATH` if executables are not on PATH.
 
 Troubleshooting
 
-- serialport native install failures: ensure your platform's native build tools or prebuilt binaries are available; on Windows prefer using prebuilt releases or install `windows-build-tools` when necessary.
+- `serialport` native install issues: ensure build tools or prebuilt binaries are available on Windows; use prebuilt releases when possible.
+- Permission denied opening COM port: check for other processes using the port and run with appropriate privileges.
+- ST tools not found: install `st-flash`, `st-util` (open-source), `STM32_Programmer_CLI`, or configure `ST_LINK_CLI_PATH`.
 
-- Permission denied opening COM port: ensure no other process holds the port and run with appropriate privileges.
+- `st.writeRegister` limitation: `st.writeRegister` is registered but not supported via simple CLI flows and will return an error unless performed inside a GDB debug session. Use `st.startDebug` + GDB for register writes.
 
-- ST tools not found: install `st-flash`, `st-util` (from stm32 open-source tools) or configure `ST_LINK_CLI_PATH`.
+Project status (MVP)
 
-Project progress (MVP status)
-
-- Serial (`serial.js`): implemented — list/open/write/read/close; single active port model.
-
-- ST‑Link (`stlink.js`): implemented core flows — device listing, flashing, read memory (via temporary file + `st-flash`), debug server; limitations: `writeRegister` unsupported via CLI (requires GDB scripting), some GDB‑monitor operations are MVP and may vary by `st-util` build.
-
-- Compiler (`compiler.js`): implemented — `make` support and STM32CubeIDE CLI detection with headless command template.
-
-- Project (`project.js`): implemented — `createProject` (bare template), file read/write, git helpers (`gitCommit`, `gitDiff`).
+- `serial.js`: list/open/write/read/close implemented (single active port model).
+- `stlink.js`: device listing, flashing, reading memory, and debug server implemented; some GDB features are MVP and may depend on `st-util` build.
+- `compiler.js`: supports `make` and detection/templating for STM32CubeIDE headless commands.
+- `project.js`: `createProject`, file operations, and git helper shell-outs implemented.
 
 Contributing
 
-Contributions are welcome. Please open issues or pull requests. Follow the repository style (ES modules, clear error messages). Note: this repository currently does not perform git operations itself when used as a library — the `git*` helpers shell out to `git`.
+Contributions are welcome. Open issues or pull requests. Follow ES module style and write clear error messages. Note: git helpers shell out to `git`; this repo itself will not perform git operations automatically.
 
 License
 
-This project is released under the MIT License. See `LICENSE`.
+This project is licensed under the MIT License. See `LICENSE`.

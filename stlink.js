@@ -30,8 +30,9 @@ const execFileAsync = promisify(execFile);
 let stUtilProc = null;
 let gdbPort = 4242;
 
-// Discover tool paths or names (assume PATH has them). Optionally ST_LINK_CLI_PATH env.
+// Discover tool paths or names (assume PATH has them). Optionally set via env.
 const ST_LINK_CLI = process.env.ST_LINK_CLI_PATH || 'ST-LINK_CLI.exe';
+const STM32_PROGRAMMER_CLI = process.env.STM32_PROGRAMMER_CLI_PATH || 'STM32_Programmer_CLI.exe';
 const ST_INFO = process.env.ST_INFO_PATH || 'st-info';
 const ST_FLASH = process.env.ST_FLASH_PATH || 'st-flash';
 const ST_UTIL = process.env.ST_UTIL_PATH || 'st-util';
@@ -82,8 +83,15 @@ export async function listDevices() {
       return { tool: 'ST-LINK_CLI', devices: stdout.split(/\r?\n/).filter(Boolean) };
     } catch {}
   }
+  // Try STM32_Programmer_CLI.exe -l
+  if (await isExecutable(STM32_PROGRAMMER_CLI)) {
+    try {
+      const { stdout } = await execFileAsync(STM32_PROGRAMMER_CLI, ['-l'], { windowsHide: true });
+      return { tool: 'STM32_Programmer_CLI', devices: stdout.split(/\r?\n/).filter(Boolean) };
+    } catch {}
+  }
   // If none available
-  throw new Error('No ST-Link tools found. Please install STM32 tools (st-info/st-flash/st-util or ST-LINK_CLI.exe) and/or set ST_LINK_CLI_PATH env.');
+  throw new Error('No ST-Link tools found. Install stlink (st-info/st-flash/st-util) or STM32CubeProgrammer (STM32_Programmer_CLI.exe), or set env paths.');
 }
 
 export async function flashFirmware({ path: fwPath, addr }) {
@@ -116,7 +124,19 @@ export async function flashFirmware({ path: fwPath, addr }) {
       throw new Error(`ST-LINK_CLI failed: ${msg}`);
     }
   }
-  throw new Error('No ST-Link flasher tool available (st-flash or ST-LINK_CLI.exe).');
+  // Fallback: STM32_Programmer_CLI.exe -c port=SWD -w <file> [addr] -v -rst
+  if (await isExecutable(STM32_PROGRAMMER_CLI)) {
+    const address = addr != null ? parseIntHexOrDec(addr, 'addr') : 0x08000000;
+    const args = ['-c', 'port=SWD', '-w', abs, '0x' + address.toString(16), '-v', '-rst'];
+    try {
+      const { stdout, stderr } = await execFileAsync(STM32_PROGRAMMER_CLI, args, { windowsHide: true });
+      return { tool: 'STM32_Programmer_CLI', stdout, stderr };
+    } catch (e) {
+      const msg = e?.stderr || e?.stdout || e?.message || String(e);
+      throw new Error(`STM32_Programmer_CLI failed: ${msg}`);
+    }
+  }
+  throw new Error('No ST-Link flasher tool available (st-flash, ST-LINK_CLI.exe, or STM32_Programmer_CLI.exe).');
 }
 
 export async function readRegister({ addr, length = 4 }) {
@@ -138,8 +158,24 @@ export async function readRegister({ addr, length = 4 }) {
       try { await (await import('node:fs/promises')).unlink(tmpFile); } catch {}
     }
   }
+  // Try STM32_Programmer_CLI.exe dump: -c port=SWD -d <file> <addr> <size>
+  if (await isExecutable(STM32_PROGRAMMER_CLI)) {
+    const osTmp = process.env.TEMP || process.env.TMP || process.cwd();
+    const tmpFile = path.join(osTmp, `stread_${Date.now()}_${Math.random().toString(16).slice(2)}.bin`);
+    try {
+      const args = ['-c', 'port=SWD', '-d', tmpFile, '0x' + address.toString(16), String(size)];
+      const { stdout, stderr } = await execFileAsync(STM32_PROGRAMMER_CLI, args, { windowsHide: true });
+      const data = await (await import('node:fs/promises')).readFile(tmpFile);
+      return { tool: 'STM32_Programmer_CLI', bytes: Array.from(data.values()) };
+    } catch (e) {
+      const msg = e?.stderr || e?.stdout || e?.message || String(e);
+      throw new Error(`STM32_Programmer_CLI read failed: ${msg}`);
+    } finally {
+      try { await (await import('node:fs/promises')).unlink(tmpFile); } catch {}
+    }
+  }
   // ST-LINK_CLI.exe: no simple direct memory dump CLI without scripts; skip for MVP
-  throw new Error('readRegister requires st-flash. Please install it (STM32 open-source tools).');
+  throw new Error('readRegister requires st-flash or STM32_Programmer_CLI. Install one and set env path.');
 }
 
 export async function writeRegister({ addr, value }) {
@@ -169,6 +205,16 @@ export async function resetDevice() {
     } catch (e) {
       const msg = e?.stderr || e?.stdout || e?.message || String(e);
       throw new Error(`ST-LINK_CLI reset failed: ${msg}`);
+    }
+  }
+  // STM32_Programmer_CLI.exe -c port=SWD -rst
+  if (await isExecutable(STM32_PROGRAMMER_CLI)) {
+    try {
+      const { stdout, stderr } = await execFileAsync(STM32_PROGRAMMER_CLI, ['-c', 'port=SWD', '-rst'], { windowsHide: true });
+      return { tool: 'STM32_Programmer_CLI', stdout, stderr };
+    } catch (e) {
+      const msg = e?.stderr || e?.stdout || e?.message || String(e);
+      throw new Error(`STM32_Programmer_CLI reset failed: ${msg}`);
     }
   }
   throw new Error('No ST-Link reset tool available (st-flash or ST-LINK_CLI.exe).');
